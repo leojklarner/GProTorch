@@ -1,153 +1,148 @@
 """
-Instantiation of the abstract data loader class for
-molecular property prediction datasets.
+Implementation of the abstract DataLoader class for
+molecular property prediction tasks.
+
+Author: Leo Klarner (https://github.com/leojklarner), March 2021
 """
 
 import numpy as np
 import pandas as pd
+from rdkit.Chem import MolFromSmiles
+
 from gprotorch.dataloader import DataLoader
-from rdkit.Chem import AllChem, Descriptors, MolFromSmiles
+from gprotorch.dataloader.dataloader_utils import (molecule_fingerprints,
+                                                   molecule_descriptors)
 
 
 class DataLoaderMP(DataLoader):
+    """
+    Task-specific implementation of the abstract DataLoader base class
+    for molecular property prediction datasets.
+    Reads in and stores molecules as SMILES representations and featurises them
+    by calculating physicochemical descriptors, molecular fingerprints and others.
+    """
 
-    def __init__(self):
-        super(DataLoaderMP, self).__init__()
-        self.task = "molecular_property_prediction"
-        self._features = None
-        self._labels = None
-
-    @property
-    def features(self):
-        return self._features
-
-    @features.setter
-    def features(self, value):
-        self._features = value
-
-    @property
-    def labels(self):
-        return self._labels
-
-    @labels.setter
-    def labels(self, value):
-        self._labels = value
-
-    def validate(self, drop=True):
-        """Checks if the features are valid SMILES strings and (potentially)
-        drops the entries that are not.
+    def __init__(self, validate_internal_rep=True):
+        """
+        Class initialisation.
 
         Args:
-            drop: whether to drop invalid entries
+            validate_internal_rep: whether to verify that the provided objects are valid
+            SMILES representations by attempting to parse them to rdkit Mol objects.
 
         """
 
-        invalid_idx = []
+        super(DataLoaderMP, self).__init__(validate_internal_rep=validate_internal_rep)
 
-        # iterate through the features
-        for i in range(len(self.features)):
+    def _validate(self, data):
+        """
+        Checks whether the provided SMILES represenations are valid by attempting to parse
+        them to rdkit Mol objects, discarding invalid ones.
 
-            # try to convert each SMILES to an rdkit molecule
-            mol = MolFromSmiles(self.features[i])
+        Args:
+            data: the SMILES representations to be checked
 
-            # if it does not work, save the index and print its position to the console
+        Returns: (valid, invalid) tuple of lists, containing the
+        valid and invalid SMILES representations
+
+        """
+
+        valid = []
+        invalid = []
+
+        # iterate through the provided SMILES representaions
+
+        for i in range(len(data)):
+
+            # denote the given SMILES representation as valid or invalid
+            # depending on whether an rdkit Mol object could be parsed
+
+            mol = MolFromSmiles(data[i])
+
             if mol is None:
-                invalid_idx.append(i)
-                print(f"Invalid SMILES at position {i+1}: {self.features[i]}")
+                invalid.append(data[i])
+            else:
+                valid.append(data[i])
 
-        if drop:
-            self.features = np.delete(self.features, invalid_idx).tolist()
-            self.labels = np.delete(self.labels, invalid_idx)
+        return valid, invalid
 
     def featurize(self, representation, bond_radius=3, nBits=2048):
-        """Transforms SMILES into the specified molecular representation.
+        """
+        Applies the specified transformation to the currently loaded objects and
+        stores the resulting features in self.features.
 
         Args:
-            representation: the desired molecular representation, one of [fingerprints, fragments, fragprints]
-            bond_radius: int giving the bond radius for Morgan fingerprints. Default is 3
-            nBits: int giving the bit vector length for Morgan fingerprints. Default is 2048
+            representation: the desired molecular representation,
+            one of ["fingerprints", "fragments", "fragprints"]
+            bond_radius: the bond radius for Morgan fingerprints, default is 3
+            nBits: the bit vector length for Morgan fingerprints, default is 2048
 
         """
-
-        # auxiliary function to calculate the fingerprint representation of a molecule
-        def fingerprints():
-
-            rdkit_mols = [MolFromSmiles(smiles) for smiles in self.features]
-            fps = [AllChem.GetMorganFingerprintAsBitVect(mol, bond_radius, nBits=nBits) for mol in rdkit_mols]
-
-            return np.asarray(fps)
-
-        # auxiliary function to calculate the fragment representation of a molecule
-        def fragments():
-
-            # descList[115:] contains fragment-based features only
-            # (https://www.rdkit.org/docs/source/rdkit.Chem.Fragments.html)
-            fragments = {d[0]: d[1] for d in Descriptors.descList[115:]}
-            frags = np.zeros((len(self.features), len(fragments)))
-            for i in range(len(self.features)):
-                mol = MolFromSmiles(self.features[i])
-                try:
-                    features = [fragments[d](mol) for d in fragments]
-                except:
-                    raise Exception('molecule {}'.format(i) + ' is not canonicalised')
-                frags[i, :] = features
-
-            return frags
 
         valid_representations = ["fingerprints", "fragments", "fragprints"]
 
         if representation == "fingerprints":
 
-            self.features = fingerprints()
+            self.features = molecule_fingerprints(self.objects, bond_radius, nBits)
 
         elif representation == "fragments":
 
-            self.features = fragments()
+            self.features = molecule_descriptors(self.objects, fragments=True)
 
         elif representation == "fragprints":
 
-            self.features = np.concatenate((fingerprints(), fragments()), axis=1)
+            self.features = np.concatenate(
+                (
+                    molecule_fingerprints(self.objects, bond_radius, nBits),
+                    molecule_descriptors(self._features, fragments=True),
+                ),
+                axis=1,
+            )
 
         else:
 
-            raise Exception(f"The specified representation choice {representation} is not a valid option."
-                            f"Choose between {valid_representations}.")
+            raise Exception(
+                f"The specified representation choice {representation} is not a valid option."
+                f"Choose between {valid_representations}."
+            )
 
     def load_benchmark(self, benchmark, path):
-        """Loads features and labels from one of the included benchmark datasets
-        and feeds them into the DataLoader.
+        """
+        Loads the SMILES representations and labels for the specified benchmark dataset.
 
         Args:
-            benchmark: the benchmark dataset to be loaded, one of
-            [Photoswitch, ESOL, FreeSolv, Lipophilicity]
+            benchmark: the benchmark dataset to be loaded,
+            one of ['Photoswitch', 'ESOL', 'FreeSolv', 'Lipophilicity']
             path: the path to the dataset in csv format
 
         """
 
+        # dictionary specifying which columns to read in for which benchmark dataset
+
         benchmarks = {
-            "Photoswitch":      {"features": "SMILES",
-                                 "labels": "E isomer pi-pi* wavelength in nm"},
-            "ESOL":             {"features": "smiles",
-                                 "labels": "measured log solubility in mols per litre"},
-            "FreeSolv":         {"features": "smiles",
-                                 "labels": "expt"},
-            "Lipophilicity":    {"features": "smiles",
-                                 "labels": "exp"},
+            "Photoswitch": {
+                "features": "SMILES",
+                "labels": "E isomer pi-pi* wavelength in nm",
+            },
+            "ESOL": {
+                "features": "smiles",
+                "labels": "measured log solubility in mols per litre",
+            },
+            "FreeSolv": {"features": "smiles", "labels": "expt"},
+            "Lipophilicity": {"features": "smiles", "labels": "exp"},
         }
+
+        # read in the specified benchmark dataset, if a valid one was chosen
 
         if benchmark not in benchmarks.keys():
 
-            raise Exception(f"The specified benchmark choice ({benchmark}) is not a valid option. "
-                            f"Choose one of {list(benchmarks.keys())}.")
+            raise Exception(
+                f"The specified benchmark choice ({benchmark}) is not a valid option. "
+                f"Choose one of {list(benchmarks.keys())}."
+            )
 
         else:
 
             df = pd.read_csv(path)
-            self.features = df[benchmarks[benchmark]["features"]].to_list()
+            self.objects = df[benchmarks[benchmark]["features"]].to_list()
             self.labels = df[benchmarks[benchmark]["labels"]].to_numpy()
-
-
-if __name__ == '__main__':
-    loader = DataLoaderMP()
-    loader.load_benchmark("ESOL", "../../data/property_prediction/ESOL.csv")
-    print(loader)
